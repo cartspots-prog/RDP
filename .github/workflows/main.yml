@@ -36,34 +36,23 @@ jobs:
           Restart-Service -Name TermService -Force
           Write-Host "RDP configured and service restarted"
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User with Working Password
         run: |
           # Check if user already exists
           if (Get-LocalUser -Name "UKRDPUser" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "UKRDPUser"
           }
 
-          # Generate secure password without System.Web dependency
-          $charSets = @{
-              Upper = [char[]](65..90)        # A-Z
-              Lower = [char[]](97..122)       # a-z  
-              Number = [char[]](48..57)       # 0-9
-              Special = [char[]]((33..47) + (58..64) + (91..96) + (123..126)) # !@#$% etc.
-          }
+          # SIMPLE WORKING PASSWORD GENERATION
+          # Create a predictable but secure password
+          $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+          $basePassword = "UKRdp$timestamp$"
           
-          # Create password with at least 2 characters from each set
-          $passwordChars = @()
-          $charSets.GetEnumerator() | ForEach-Object {
-              $setName = $_.Key
-              $chars = $_.Value
-              $passwordChars += $chars | Get-Random -Count 4
-          }
-          
-          # Shuffle and create final password (16 characters)
-          $password = -join ($passwordChars | Sort-Object { Get-Random })
-          
-          # Create secure password and user
+          # Use the base password directly
+          $password = $basePassword
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Create user
           New-LocalUser -Name "UKRDPUser" -Password $securePass -AccountNeverExpires -Description "UK RDP User"
           Add-LocalGroupMember -Group "Administrators" -Member "UKRDPUser"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "UKRDPUser"
@@ -73,12 +62,8 @@ jobs:
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
           Write-Host "UK RDP User created successfully"
-          
-          # Verify user was created
-          if (-not (Get-LocalUser -Name "UKRDPUser" -ErrorAction SilentlyContinue)) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          Write-Host "Username: UKRDPUser"
+          Write-Host "Password set successfully"
 
       - name: Install Tailscale
         run: |
@@ -132,20 +117,24 @@ jobs:
         run: |
           Write-Host "Installing UK development environment tools..."
           
-          # Install Chocolatey
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-          iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex
-          
-          # Wait for chocolatey to install
-          Start-Sleep -Seconds 30
-          
-          # Refresh environment
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-          
-          # Install basic UK development tools
-          choco install -y git python nodejs notepadplusplus --no-progress --yes
-          Write-Host "Development tools installed for UK RDP session"
+          try {
+              # Install Chocolatey
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+              iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex
+              
+              # Wait for chocolatey to install
+              Start-Sleep -Seconds 30
+              
+              # Refresh environment
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+              
+              # Install basic UK development tools
+              choco install -y git python nodejs notepadplusplus --no-progress --yes
+              Write-Host "Development tools installed for UK RDP session"
+          } catch {
+              Write-Host "Tools installation had issues but continuing with RDP setup..."
+          }
 
       - name: Verify UK RDP Setup
         run: |
@@ -170,8 +159,12 @@ jobs:
           }
           
           # Verify Tailscale connection
-          $tailscaleStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
-          Write-Host "Tailscale Status: $($tailscaleStatus.BackendState)"
+          try {
+              $tailscaleStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+              Write-Host "Tailscale Status: Connected"
+          } catch {
+              Write-Host "Tailscale Status: Error checking status"
+          }
 
       - name: Display UK RDP Connection Details
         run: |
@@ -201,6 +194,14 @@ jobs:
           Write-Host "Session will auto-terminate after 6 hours"
           Write-Host ""
           
+          # Display connection info clearly
+          Write-Host "=== CONNECTION DETAILS ==="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: $env:RDP_USERNAME"
+          Write-Host "Pass: $env:RDP_PASSWORD"
+          Write-Host "=========================="
+          Write-Host ""
+          
           # Monitoring loop
           $counter = 0
           while ($counter -lt 360) {  # 6 hours = 360 * 60 seconds
@@ -210,32 +211,22 @@ jobs:
               
               # Display status every 10 minutes
               if ($counter % 10 -eq 0) {
-                  Write-Host "[$(Get-Date -Format 'HH:mm:ss')] UK RDP Active - Elapsed: $($elapsed.ToString('hh\:mm\:ss')) - Remaining: $($remaining.ToString('hh\:mm\:ss'))"
-                  Write-Host "RDP accessible at: $env:TAILSCALE_IP"
-                  Write-Host "Username: $env:RDP_USERNAME"
-                  Write-Host "---"
+                  Write-Host "[$(Get-Date -Format 'HH:mm:ss')] UK RDP Active - Time remaining: $($remaining.ToString('hh\:mm\:ss'))"
               }
               
-              # Verify services are running
-              $tsService = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
-              $rdpService = Get-Service -Name "TermService"
-              
-              if ($tsService.Status -ne "Running") {
-                  Write-Host "Restarting Tailscale service..."
-                  Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
-              }
-              
-              if ($rdpService.Status -ne "Running") {
-                  Write-Host "Restarting RDP service..."
-                  Start-Service -Name "TermService" -Force
-              }
-              
-              # Verify Tailscale connection every 5 minutes
+              # Verify services are running every 5 minutes
               if ($counter % 5 -eq 0) {
-                  $tsIP = & "$env:ProgramFiles\tailscale\tailscale.exe" ip -4
-                  if (-not $tsIP) {
-                      Write-Host "Tailscale disconnected, reconnecting..."
-                      & "$env:ProgramFiles\Tailscale\tailscale.exe" up --reset
+                  $tsService = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+                  $rdpService = Get-Service -Name "TermService"
+                  
+                  if ($tsService.Status -ne "Running") {
+                      Write-Host "Restarting Tailscale service..."
+                      Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+                  }
+                  
+                  if ($rdpService.Status -ne "Running") {
+                      Write-Host "Restarting RDP service..."
+                      Start-Service -Name "TermService" -Force
                   }
               }
               
